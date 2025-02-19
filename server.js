@@ -10,6 +10,8 @@ const fs = require('fs');
 const mongoose = require('mongoose');
 
 const app = express();
+const PORT = process.env.PORT || 5002;
+
 // Middleware
 app.use(bodyParser.json());
 app.use(cors());
@@ -64,8 +66,7 @@ function connectImap() {
 
 imap.on('error', (err) => {
     console.error('IMAP error:', err);
-    // Attempt to reconnect after a delay
-    setTimeout(connectImap, 5000);
+    setTimeout(connectImap, 5000); // Attempt to reconnect after 5s
 });
 
 imap.on('end', () => {
@@ -81,12 +82,12 @@ process.on('uncaughtException', (err) => {
     console.error('Uncaught exception:', err);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
     console.error('Unhandled rejection:', reason);
 });
 
 // ✅ Send Email Route
-app.post('/send-email', upload.single('attachment'), (req, res) => {
+app.post('/send-email', upload.single('attachment'), async (req, res) => {
     const { email, subject, body } = req.body;
     const file = req.file;
 
@@ -102,11 +103,8 @@ app.post('/send-email', upload.single('attachment'), (req, res) => {
         attachments: file ? [{ filename: file.originalname, path: file.path }] : [],
     };
 
-    transporter.sendMail(mailOptions, (error, info) => {
-        if (error) {
-            console.error('Error sending email:', error);
-            return res.status(500).send({ message: 'Error sending email', error: error.message });
-        }
+    try {
+        const info = await transporter.sendMail(mailOptions);
 
         if (file) {
             fs.unlink(file.path, (err) => {
@@ -117,7 +115,10 @@ app.post('/send-email', upload.single('attachment'), (req, res) => {
         sentEmails.push({ from: process.env.SMTP_USER, to: email, subject, body, date: new Date() });
 
         res.status(200).send({ message: 'Email sent successfully!', info });
-    });
+    } catch (error) {
+        console.error('Error sending email:', error);
+        res.status(500).send({ message: 'Error sending email', error: error.message });
+    }
 });
 
 // ✅ Fetch Sent Emails API
@@ -192,7 +193,6 @@ app.get('/fetch-inbox-emails', async (req, res) => {
 });
 
 // ✅ Start Server
-const PORT = process.env.PORT || 5002;
 app.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}`);
 });
