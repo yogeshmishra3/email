@@ -22,15 +22,8 @@ mongoose
     .then(() => console.log("✅ MongoDB Connected"))
     .catch((err) => console.error("❌ MongoDB Connection Error:", err));
 
-// Draft Schema
-const DraftSchema = new mongoose.Schema({
-    to: { type: String, required: false },
-    subject: { type: String, required: false },
-    body: { type: String, required: false },
-    date: { type: Date, default: Date.now }
-});
 
-const Draft = mongoose.model("Draft", DraftSchema);
+
 
 // Configure Multer for file uploads
 const upload = multer({ dest: 'uploads/' });
@@ -191,6 +184,48 @@ app.get('/fetch-inbox-emails', async (req, res) => {
         res.status(500).send({ message: 'Error fetching inbox emails', error: err.message });
     }
 });
+const draftSchema = new mongoose.Schema({
+    email: String,
+    subject: String,
+    body: String,
+    createdAt: { type: Date, default: Date.now }
+});
+
+const Draft = mongoose.model("Draft", draftSchema);
+
+// 📌 Save Draft API (POST)
+app.post("/save-draft", async (req, res) => {
+    try {
+        const { email, subject, body } = req.body;
+
+        let draft = await Draft.findOne(); // Fetch the first draft (if exists)
+
+        if (draft) {
+            draft.email = email;
+            draft.subject = subject;
+            draft.body = body;
+            await draft.save();
+        } else {
+            draft = new Draft({ email, subject, body });
+            await draft.save();
+        }
+
+        res.json({ message: "Draft saved successfully!", draft });
+    } catch (error) {
+        res.status(500).json({ message: "Error saving draft", error });
+    }
+});
+
+// 📌 Get Draft API (GET)
+app.get("/get-draft", async (req, res) => {
+    try {
+        const draft = await Draft.findOne();
+        res.json(draft || {});
+    } catch (error) {
+        res.status(500).json({ message: "Error retrieving draft", error });
+    }
+});
+
 
 // ✅ Start Server
 app.listen(PORT, () => {
