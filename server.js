@@ -21,7 +21,7 @@ const emailLimiter = rateLimit({
 // ✅ Authorized users (store securely in .env)
 const AUTHORIZED_USERS = {
     "kritikaansari8@gmail.com": process.env.APP_PASSWORD_KRITIKA,
-
+    "yogibaba1207@gmail.com": process.env.APP_PASSWORD_YOGIBABA,
 };
 
 // ✅ Multer configuration for file upload (restrict file types)
