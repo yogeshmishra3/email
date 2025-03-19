@@ -1,233 +1,232 @@
-require('dotenv').config(); // Load environment variables
-const express = require('express');
-const nodemailer = require('nodemailer');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const Imap = require('node-imap');
-const { simpleParser } = require('mailparser');
-const multer = require('multer');
-const fs = require('fs');
-const mongoose = require('mongoose');
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+require("dotenv").config();
+const express = require("express");
+const nodemailer = require("nodemailer");
+const cors = require("cors");
+const rateLimit = require("express-rate-limit");
+const multer = require("multer");
+const Imap = require("imap-simple");
 
 const app = express();
-const PORT = process.env.PORT || 5002;
-
-// Middleware
-app.use(bodyParser.json());
+app.use(express.json());
 app.use(cors());
 
-// Connect to MongoDB
-mongoose
-    .connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-    .then(() => console.log("✅ MongoDB Connected"))
-    .catch((err) => console.error("❌ MongoDB Connection Error:", err));
+// ✅ Rate limiting to prevent spam (100 requests per 15 min)
+const emailLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    message: { error: "Too many requests, please try again later." },
+});
 
+// ✅ Authorized users (store securely in .env)
+const AUTHORIZED_USERS = {
+    "kritikaansari8@gmail.com": process.env.APP_PASSWORD_KRITIKA,
 
+};
 
-
-// Configure Multer for file uploads
-const upload = multer({ dest: 'uploads/' });
-
-// In-memory storage for sent emails
-const sentEmails = [];
-
-// Configure Nodemailer
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: process.env.SMTP_PORT,
-    secure: false,
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
+// ✅ Multer configuration for file upload (restrict file types)
+const upload = multer({
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = ["image/png", "image/jpeg", "application/pdf", "text/plain"];
+        if (allowedTypes.includes(file.mimetype)) {
+            cb(null, true);
+        } else {
+            cb(new Error("Invalid file type. Only PNG, JPEG, PDF, and TXT are allowed."));
+        }
     },
 });
 
-// IMAP Configuration
-const imap = new Imap({
-    user: process.env.IMAP_USER,
-    password: process.env.IMAP_PASS,
-    host: process.env.IMAP_HOST,
-    port: process.env.IMAP_PORT,
-    tls: true,
-    timeout: 30000,
-});
+// ✅ Send email
+app.post("/send-email", emailLimiter, upload.single("attachment"), async (req, res) => {
+    const { fromEmail, toEmail, subject, message } = req.body;
+    const attachment = req.file;
 
-// Function to connect IMAP
-function connectImap() {
-    imap.connect();
-}
-
-imap.on('error', (err) => {
-    console.error('IMAP error:', err);
-    setTimeout(connectImap, 5000); // Attempt to reconnect after 5s
-});
-
-imap.on('end', () => {
-    console.log('IMAP connection ended. Reconnecting...');
-    setTimeout(connectImap, 5000);
-});
-
-// Initial connection
-connectImap();
-
-// Error handling for uncaught exceptions and unhandled rejections
-process.on('uncaughtException', (err) => {
-    console.error('Uncaught exception:', err);
-});
-
-process.on('unhandledRejection', (reason) => {
-    console.error('Unhandled rejection:', reason);
-});
-
-// ✅ Send Email Route
-app.post('/send-email', upload.single('attachment'), async (req, res) => {
-    const { email, subject, body } = req.body;
-    const file = req.file;
-
-    if (!email || !subject || !body) {
-        return res.status(400).send({ message: 'Recipient email, subject, and body are required' });
+    if (!fromEmail || !toEmail || !subject || !message) {
+        return res.status(400).json({ error: "All fields are required." });
     }
 
-    const mailOptions = {
-        from: process.env.SMTP_USER,
-        to: email,
-        subject: subject,
-        text: body,
-        attachments: file ? [{ filename: file.originalname, path: file.path }] : [],
-    };
-
-    try {
-        const info = await transporter.sendMail(mailOptions);
-
-        if (file) {
-            fs.unlink(file.path, (err) => {
-                if (err) console.error('Error deleting uploaded file:', err);
-            });
-        }
-
-        sentEmails.push({ from: process.env.SMTP_USER, to: email, subject, body, date: new Date() });
-
-        res.status(200).send({ message: 'Email sent successfully!', info });
-    } catch (error) {
-        console.error('Error sending email:', error);
-        res.status(500).send({ message: 'Error sending email', error: error.message });
+    if (!(fromEmail in AUTHORIZED_USERS)) {
+        return res.status(403).json({ error: "Unauthorized sender." });
     }
-});
-
-// ✅ Fetch Sent Emails API
-app.get('/fetch-sent-emails', (req, res) => {
-    try {
-        sentEmails.sort((a, b) => new Date(b.date) - new Date(a.date));
-        res.status(200).send({ emails: sentEmails });
-    } catch (err) {
-        console.error('Error fetching sent emails:', err);
-        res.status(500).send({ message: 'Error fetching sent emails', error: err.message });
-    }
-});
-
-// ✅ Fetch Inbox Emails API
-app.get('/fetch-inbox-emails', async (req, res) => {
-    const emails = [];
 
     try {
-        await new Promise((resolve, reject) => {
-            imap.once('ready', () => {
-                const folderToOpen = 'INBOX';
-
-                imap.openBox(folderToOpen, true, (err, box) => {
-                    if (err) return reject(new Error(`Error opening folder '${folderToOpen}': ${err.message}`));
-
-                    imap.search(['ALL'], (err, results) => {
-                        if (err) return reject(new Error(`Error searching emails: ${err.message}`));
-
-                        if (results.length === 0) {
-                            console.log(`No emails found in folder '${folderToOpen}'.`);
-                            return resolve();
-                        }
-
-                        const fetcher = imap.fetch(results.reverse(), { bodies: '' });
-
-                        fetcher.on('message', (msg) => {
-                            msg.on('body', (stream) => {
-                                simpleParser(stream, (err, parsed) => {
-                                    if (err) return console.error('Error parsing email:', err.message);
-
-                                    if (parsed?.from?.text && parsed.subject && parsed.date) {
-                                        emails.push({
-                                            from: parsed.from.text,
-                                            subject: parsed.subject,
-                                            date: parsed.date,
-                                            body: parsed.text,
-                                        });
-                                    }
-                                });
-                            });
-                        });
-
-                        fetcher.once('end', () => {
-                            console.log(`Finished fetching emails from folder '${folderToOpen}'.`);
-                            resolve();
-                        });
-                    });
-                });
-            });
-
-            imap.once('error', (err) => reject(new Error(`IMAP connection error: ${err.message}`)));
-            imap.once('end', () => console.log('IMAP connection closed.'));
-            imap.connect();
+        const transporter = nodemailer.createTransport({
+            service: "gmail",
+            auth: {
+                user: fromEmail,
+                pass: AUTHORIZED_USERS[fromEmail],
+            },
         });
 
-        emails.sort((a, b) => new Date(b.date) - new Date(a.date));
-        res.status(200).send({ emails });
-    } catch (err) {
-        console.error('Error fetching inbox emails:', err);
-        res.status(500).send({ message: 'Error fetching inbox emails', error: err.message });
-    }
-});
-const draftSchema = new mongoose.Schema({
-    email: String,
-    subject: String,
-    body: String,
-    createdAt: { type: Date, default: Date.now }
-});
+        const mailOptions = {
+            from: fromEmail,
+            to: toEmail,
+            subject,
+            text: message,
+            attachments: attachment
+                ? [{ filename: attachment.originalname, content: attachment.buffer }]
+                : [],
+        };
 
-const Draft = mongoose.model("Draft", draftSchema);
-
-// 📌 Save Draft API (POST)
-app.post("/save-draft", async (req, res) => {
-    try {
-        const { email, subject, body } = req.body;
-
-        let draft = await Draft.findOne(); // Fetch the first draft (if exists)
-
-        if (draft) {
-            draft.email = email;
-            draft.subject = subject;
-            draft.body = body;
-            await draft.save();
-        } else {
-            draft = new Draft({ email, subject, body });
-            await draft.save();
-        }
-
-        res.json({ message: "Draft saved successfully!", draft });
+        await transporter.sendMail(mailOptions);
+        res.json({ success: true, message: "Email sent successfully!" });
     } catch (error) {
-        res.status(500).json({ message: "Error saving draft", error });
+        console.error("❌ Email send error:", error.message);
+        res.status(500).json({ error: "Failed to send email. Please try again later." });
     }
 });
 
-// 📌 Get Draft API (GET)
-app.get("/get-draft", async (req, res) => {
+// ✅ Fetch emails from a folder
+async function fetchEmailsFromFolder(email, folderName, limit = 20) {
+    if (!email || !(email in AUTHORIZED_USERS)) {
+        throw new Error("Unauthorized email account.");
+    }
+
+    const config = {
+        imap: {
+            user: email,
+            password: AUTHORIZED_USERS[email],
+            host: "imap.gmail.com",
+            port: 993,
+            tls: true,
+            tlsOptions: { rejectUnauthorized: false },
+        },
+    };
+
+    const connection = await Imap.connect(config);
+    await connection.openBox(folderName);
+
+    const searchCriteria = ["ALL"];
+    const fetchOptions = {
+        bodies: ["HEADER.FIELDS (FROM TO SUBJECT DATE)", "TEXT"],
+        struct: true,
+    };
+
+    const messages = await connection.search(searchCriteria, fetchOptions);
+    const emails = messages.slice(0, limit).map((message) => {
+        const headerPart = message.parts.find((part) =>
+            part.which === "HEADER.FIELDS (FROM TO SUBJECT DATE)"
+        );
+        const bodyPart = message.parts.find((part) => part.which === "TEXT");
+
+        return {
+            id: message.attributes.uid,
+            from: headerPart?.body.from?.[0] || "Unknown",
+            to: headerPart?.body.to?.[0] || "Unknown",
+            subject: headerPart?.body.subject?.[0] || "No Subject",
+            date: headerPart?.body.date?.[0] || "Unknown Date",
+            body: bodyPart?.body.toString() || "No Content",
+            isRead: !message.attributes.flags.includes("\\Seen"),
+        };
+    });
+
+    await connection.end();
+    return emails;
+}
+
+// ✅ Fetch Inbox
+app.get("/fetch-inbox-emails", async (req, res) => {
+    const { email } = req.query;
     try {
-        const draft = await Draft.findOne();
-        res.json(draft || {});
+        const emails = await fetchEmailsFromFolder(email, "INBOX");
+        res.json({ success: true, emails });
     } catch (error) {
-        res.status(500).json({ message: "Error retrieving draft", error });
+        res.status(500).json({ error: error.message });
     }
 });
 
-
-// ✅ Start Server
-app.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
+// ✅ Fetch Sent Mail
+app.get("/fetch-sent-emails", async (req, res) => {
+    const { email } = req.query;
+    try {
+        const emails = await fetchEmailsFromFolder(email, "[Gmail]/Sent Mail");
+        res.json({ success: true, emails });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
+
+// ✅ Fetch Drafts
+app.get("/fetch-drafts", async (req, res) => {
+    const { email } = req.query;
+    try {
+        const emails = await fetchEmailsFromFolder(email, "[Gmail]/Drafts");
+        res.json({ success: true, emails });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ✅ List all mailboxes
+app.get("/list-mailboxes", async (req, res) => {
+    const { email } = req.query;
+    try {
+        const config = {
+            imap: {
+                user: email,
+                password: AUTHORIZED_USERS[email],
+                host: "imap.gmail.com",
+                port: 993,
+                tls: true,
+                tlsOptions: { rejectUnauthorized: false },
+            },
+        };
+
+        const connection = await Imap.connect(config);
+        const boxes = await connection.getBoxes();
+        await connection.end();
+
+        const mailboxes = Object.keys(boxes);
+        res.json({ success: true, mailboxes });
+    } catch (error) {
+        res.status(500).json({ error: "Failed to list mailboxes." });
+    }
+});
+
+// ✅ Mark email as read
+app.post("/mark-as-read", async (req, res) => {
+    const { email, messageId, folder = "INBOX" } = req.body;
+
+    try {
+        const config = {
+            imap: {
+                user: email,
+                password: AUTHORIZED_USERS[email],
+                host: "imap.gmail.com",
+                port: 993,
+                tls: true,
+                tlsOptions: { rejectUnauthorized: false },
+            },
+        };
+
+        const connection = await Imap.connect(config);
+        await connection.openBox(folder);
+        await connection.addFlags(messageId, "\\Seen");
+        await connection.end();
+
+        res.json({ success: true, message: "Email marked as read." });
+    } catch (error) {
+        res.status(500).json({ error: "Failed to mark email as read." });
+    }
+});
+
+// ✅ Search emails
+app.get("/search-emails", async (req, res) => {
+    const { email, query, folder = "INBOX" } = req.query;
+
+    try {
+        const emails = await fetchEmailsFromFolder(email, folder);
+        const filteredEmails = emails.filter(
+            (email) =>
+                email.subject.includes(query) || email.from.includes(query)
+        );
+        res.json({ success: true, emails: filteredEmails });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ✅ Start server
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
