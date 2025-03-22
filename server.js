@@ -77,6 +77,144 @@ app.post("/send-email", emailLimiter, upload.single("attachment"), async (req, r
     }
 });
 
+// ✅ Save email as draft
+app.post("/save-draft", emailLimiter, upload.single("attachment"), async (req, res) => {
+    const { fromEmail, toEmail, subject, message } = req.body;
+    const attachment = req.file;
+
+    if (!fromEmail) {
+        return res.status(400).json({ error: "From email is required." });
+    }
+
+    if (!(fromEmail in AUTHORIZED_USERS)) {
+        return res.status(403).json({ error: "Unauthorized sender." });
+    }
+
+    try {
+        const transporter = nodemailer.createTransport({
+            service: "gmail",
+            auth: {
+                user: fromEmail,
+                pass: AUTHORIZED_USERS[fromEmail],
+            },
+        });
+
+        const mailOptions = {
+            from: fromEmail,
+            to: toEmail || "",
+            subject: subject || "",
+            text: message || "",
+            attachments: attachment
+                ? [{ filename: attachment.originalname, content: attachment.buffer }]
+                : [],
+        };
+
+        // Save to drafts folder by setting the 'draft' flag
+        const info = await transporter.sendMail({
+            ...mailOptions,
+            headers: {
+                'X-GM-DRAFT': 'yes'
+            },
+            flags: ['Draft']
+        });
+
+        res.json({
+            success: true,
+            message: "Draft saved successfully!",
+            draftId: info.messageId
+        });
+    } catch (error) {
+        console.error("❌ Draft save error:", error.message);
+        res.status(500).json({ error: "Failed to save draft. Please try again later." });
+    }
+});
+
+// ✅ Update existing draft
+app.put("/update-draft/:draftId", emailLimiter, upload.single("attachment"), async (req, res) => {
+    const { draftId } = req.params;
+    const { fromEmail, toEmail, subject, message } = req.body;
+    const attachment = req.file;
+
+    if (!fromEmail || !draftId) {
+        return res.status(400).json({ error: "From email and draft ID are required." });
+    }
+
+    if (!(fromEmail in AUTHORIZED_USERS)) {
+        return res.status(403).json({ error: "Unauthorized sender." });
+    }
+
+    try {
+        // First, find and delete the existing draft
+        const config = {
+            imap: {
+                user: fromEmail,
+                password: AUTHORIZED_USERS[fromEmail],
+                host: "imap.gmail.com",
+                port: 993,
+                tls: true,
+                tlsOptions: { rejectUnauthorized: false },
+            },
+        };
+
+        const connection = await Imap.connect(config);
+        await connection.openBox("[Gmail]/Drafts");
+
+        // Search for the specific draft using Message-ID
+        const searchCriteria = ['HEADER', 'Message-ID', draftId];
+        const fetchOptions = { bodies: [''], struct: true };
+
+        const messages = await connection.search(searchCriteria, fetchOptions);
+
+        if (messages.length > 0) {
+            // Delete the existing draft
+            await connection.addFlags(messages[0].attributes.uid, '\\Deleted');
+            await connection.closeBox(true); // Expunge on close
+        } else {
+            await connection.end();
+            return res.status(404).json({ error: "Draft not found." });
+        }
+
+        await connection.end();
+
+        // Create a new draft with updated content
+        const transporter = nodemailer.createTransport({
+            service: "gmail",
+            auth: {
+                user: fromEmail,
+                pass: AUTHORIZED_USERS[fromEmail],
+            },
+        });
+
+        const mailOptions = {
+            from: fromEmail,
+            to: toEmail || "",
+            subject: subject || "",
+            text: message || "",
+            attachments: attachment
+                ? [{ filename: attachment.originalname, content: attachment.buffer }]
+                : [],
+        };
+
+        // Save the updated draft
+        const info = await transporter.sendMail({
+            ...mailOptions,
+            headers: {
+                'X-GM-DRAFT': 'yes'
+            },
+            flags: ['Draft']
+        });
+
+        res.json({
+            success: true,
+            message: "Draft updated successfully!",
+            draftId: info.messageId
+        });
+    } catch (error) {
+        console.error("❌ Draft update error:", error.message);
+        res.status(500).json({ error: "Failed to update draft. Please try again later." });
+    }
+});
+
 // ✅ Fetch emails from a folder
 async function fetchEmailsFromFolder(email, folderName, limit = 20) {
     if (!email || !(email in AUTHORIZED_USERS)) {
