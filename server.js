@@ -263,12 +263,28 @@ async function fetchEmailsFromFolder(email, folderName, limit = 20) {
     return emails;
 }
 
-// ✅ Fetch Inbox
+const { simpleParser } = require("mailparser");
+
+// ✅ Fetch Inbox with Parsed Content
 app.get("/fetch-inbox-emails", async (req, res) => {
     const { email } = req.query;
     try {
-        const emails = await fetchEmailsFromFolder(email, "INBOX");
-        res.json({ success: true, emails });
+        const rawEmails = await fetchEmailsFromFolder(email, "INBOX");
+
+        // Process each email to extract clean content
+        const parsedEmails = await Promise.all(
+            rawEmails.map(async (rawEmail) => {
+                const parsed = await simpleParser(rawEmail);
+                return {
+                    subject: parsed.subject,
+                    from: parsed.from.text,
+                    date: parsed.date,
+                    content: parsed.html || parsed.text, // Prefer HTML if available
+                };
+            })
+        );
+
+        res.json({ success: true, emails: parsedEmails });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
